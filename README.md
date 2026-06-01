@@ -1,4 +1,6 @@
-# Beginner-Friendly Python OpenCV QR Matching
+# Live-QR-target-matcher
+
+A Python OpenCV + ZXing-C++ project for detecting multiple QR codes, matching them against a target QR, and calculating target-center alignment for autonomous drone delivery workflows.
 
 This project uses a laptop webcam to detect QR codes, save one QR code as a target, and then find the matching QR code among multiple visible QR codes.
 
