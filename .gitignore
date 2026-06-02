@@ -1,0 +1,16 @@
+﻿inputs/
+outputs/
+debug_frames/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+work/debug_frames/
+work/
