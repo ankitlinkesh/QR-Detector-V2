@@ -1,4 +1,4 @@
-﻿import html
+import html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -57,8 +57,16 @@ class OutputWriter:
         cv2.imwrite(str(path), crop)
         return self.relative(path)
 
-    def save_annotated(self, image, detections, stem, title, has_filter, candidates=None):
-        annotated = draw_annotations(image, detections, title, has_filter, candidates=candidates)
+    def save_annotated(self, image, detections, stem, title, has_filter, candidates=None, raw_candidates=None, failure_reason=None):
+        annotated = draw_annotations(
+            image,
+            detections,
+            title,
+            has_filter,
+            candidates=candidates,
+            raw_candidates=raw_candidates,
+            failure_reason=failure_reason,
+        )
         path = self.annotated_dir / f"{stem}.png"
         cv2.imwrite(str(path), annotated)
         return self.relative(path)
@@ -87,17 +95,18 @@ class OutputWriter:
         return Path(path).relative_to(self.output_dir).as_posix()
 
 
-def draw_annotations(image, detections, title, has_filter, candidates=None):
+def draw_annotations(image, detections, title, has_filter, candidates=None, raw_candidates=None, failure_reason=None):
     annotated = image.copy()
     header_height = 74
     overlay = annotated.copy()
     cv2.rectangle(overlay, (0, 0), (annotated.shape[1], header_height), (8, 8, 8), -1)
     annotated = cv2.addWeighted(overlay, 0.86, annotated, 0.14, 0)
 
+    reason_text = failure_reason or "decoded"
     cv2.putText(annotated, title[:90], (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (230, 230, 230), 2, cv2.LINE_AA)
     cv2.putText(
         annotated,
-        f"Detections: {len(detections)} | Candidates: {len(candidates or [])}",
+        f"Detections: {len(detections)} | Selected: {len(candidates or [])} | Raw: {len(raw_candidates or [])} | Reason: {reason_text}",
         (16, 58),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.62,
@@ -106,12 +115,13 @@ def draw_annotations(image, detections, title, has_filter, candidates=None):
         cv2.LINE_AA,
     )
 
+    draw_raw_candidate_boxes(annotated, raw_candidates or [], header_height)
     draw_candidate_boxes(annotated, candidates or [], header_height)
 
     if not detections:
         cv2.putText(
             annotated,
-            "No QR decoded",
+            f"No QR decoded: {reason_text}",
             (20, header_height + 42),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.9,
@@ -139,6 +149,22 @@ def draw_annotations(image, detections, title, has_filter, candidates=None):
 
     return annotated
 
+
+
+def draw_raw_candidate_boxes(annotated, candidates, header_height):
+    for index, candidate in enumerate(candidates, start=1):
+        points = np.array(candidate["points"], dtype=np.int32)
+        color = (255, 210, 80)
+        for point_index in range(len(points)):
+            start = tuple(points[point_index])
+            end = tuple(points[(point_index + 1) % len(points)])
+            cv2.line(annotated, start, end, color, 1)
+
+        center = tuple(int(value) for value in candidate["center"])
+        label = f"raw {index}: {candidate['source']} {candidate.get('width', 0):.0f}x{candidate.get('height', 0):.0f}"
+        label_origin = (max(8, center[0] + 6), max(header_height + 18, center[1] + 14))
+        cv2.putText(annotated, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(annotated, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
 def draw_candidate_boxes(annotated, candidates, header_height):
     for index, candidate in enumerate(candidates, start=1):
         points = np.array(candidate["points"], dtype=np.int32)
@@ -153,6 +179,7 @@ def draw_candidate_boxes(annotated, candidates, header_height):
         label_origin = (max(8, center[0] + 8), max(header_height + 24, center[1] - 8))
         cv2.putText(annotated, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(annotated, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA)
+
 
 def choose_color(detection, has_filter):
     if detection["matched"] is True or detection["passes_filter"] is True and has_filter:
@@ -177,12 +204,25 @@ def build_results(metadata, items):
     metadata["timestamp"] = datetime.now().isoformat(timespec="seconds")
     metadata["total_detections"] = sum(len(item["detections"]) for item in items)
     metadata["total_unique_decoded_texts"] = len(unique_texts)
+    metadata["total_near_misses"] = sum(len(item.get("near_misses", [])) for item in items)
+    metadata["total_raw_candidates"] = sum(len(item.get("raw_candidates", [])) for item in items)
+    metadata["failure_reason_counts"] = count_failure_reasons(items)
 
     return {
         "metadata": metadata,
         "unique_decoded_texts": unique_texts,
         "items": items,
     }
+
+
+def count_failure_reasons(items):
+    counts = {}
+
+    for item in items:
+        reason = item.get("failure_reason") or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+
+    return counts
 
 
 def build_report_html(results):
@@ -211,13 +251,15 @@ def build_report_html(results):
                 """
             )
 
+        raw_count = len(item.get("raw_candidates", []))
+        selected_count = len(item.get("candidates", []))
         annotated = item.get("annotated_output_path")
         preview = f'<img src="{html.escape(annotated)}" alt="Annotated result">' if annotated else ""
         items_html.append(
             f"""
             <section class="card">
               <h2>{html.escape(item["input_path"])}</h2>
-              <p>Frame: {item.get("frame_index")} | Timestamp: {item.get("frame_timestamp_sec")}</p>
+              <p>Frame: {item.get("frame_index")} | Timestamp: {item.get("frame_timestamp_sec")} | Reason: {html.escape(str(item.get("failure_reason")))} | Raw candidates: {raw_count} | Selected candidates: {selected_count}</p>
               {preview}
               <table>
                 <thead>
@@ -255,11 +297,13 @@ def build_report_html(results):
     <p><span class="accent">Mode:</span> {html.escape(str(metadata.get("mode")))}</p>
     <p><span class="accent">Total detections:</span> {metadata.get("total_detections")}</p>
     <p><span class="accent">Unique decoded texts:</span> {metadata.get("total_unique_decoded_texts")}</p>
+    <p><span class="accent">Near misses:</span> {metadata.get("total_near_misses")}</p>
+    <p><span class="accent">Raw candidates:</span> {metadata.get("total_raw_candidates")}</p>
+    <p><span class="accent">Failure reasons:</span> {html.escape(str(metadata.get("failure_reason_counts")))}</p>
     <p><span class="accent">Filters:</span> {html.escape(str(metadata.get("filters_used")))}</p>
   </section>
   {''.join(items_html)}
 </main>
 </body>
 </html>"""
-
 
